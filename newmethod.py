@@ -17,7 +17,11 @@ def parse_single_fit_file(file_path):
         "filename": os.path.basename(file_path),
         "total_distance_km": None,
         "avg_heart_rate_bpm": None,
-        "avg_pace_min_per_km": None
+        "max_heart_rate_bpm": None,
+        "avg_pace_min_per_km": None,
+        "avg_running_cadence": None,
+        "workout_type": None,
+        "lap_count": None
     }
 
     hr_values = []
@@ -31,6 +35,25 @@ def parse_single_fit_file(file_path):
         avg_hr = message.get_value('avg_heart_rate')
         total_dist = message.get_value('total_distance')  # in meters
         total_time = message.get_value('total_elapsed_time')  # in seconds
+
+        # Extract average cadence (Apple Watch stores as strides/cycles, multiply by 2 for SPM)
+        avg_cadence_raw = message.get_value('avg_running_cadence')
+        if avg_cadence_raw:
+            metrics["avg_running_cadence"] = int(avg_cadence_raw * 2)
+
+        # Extract Max Heart Rate
+        max_hr_raw = message.get_value('max_heart_rate')
+        if max_hr_raw:
+            metrics["max_heart_rate_bpm"] = float(max_hr_raw)
+
+        # Extract Workout Type and Lap Count from summary block
+        workout_type_val = message.get_value('workout_type') 
+        if workout_type_val is not None:
+            metrics["workout_type"] = str(workout_type_val)
+
+        lap_count_val = message.get_value('num_laps')
+        if lap_count_val is not None:
+            metrics["lap_count"] = int(lap_count_val)
 
         if total_dist:
             metrics["total_distance_km"] = round(total_dist / 1000.0, 2)
@@ -62,7 +85,7 @@ def parse_single_fit_file(file_path):
             metrics["avg_heart_rate_bpm"] = round(sum(hr_values) / len(hr_values), 1)
 
     # Return metrics only if we successfully parsed some basic data
-    if metrics["total_distance_km"] or metrics["avg_heart_rate_bpm"]:
+    if metrics["total_distance_km"] or metrics["avg_heart_rate_bpm"] or metrics["avg_running_cadence"]:
         return metrics
     return None
 
