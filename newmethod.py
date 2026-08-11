@@ -47,9 +47,37 @@ def parse_single_fit_file(file_path):
             metrics["max_heart_rate_bpm"] = float(max_hr_raw)
 
         # Extract Workout Type and Lap Count from summary block
-        workout_type_val = message.get_value('workout_type') 
-        if workout_type_val is not None:
-            metrics["workout_type"] = str(workout_type_val)
+        workout_type_raw = message.get_value('workout_type')
+        
+        # Try standard 'SESSION ACTIVITY TYPE' if the generic key is null (Apple Watch specific)
+        if workout_type_raw is None:
+            activity_key_val = message.get_value('SESSION ACTIVITY TYPE')
+            if activity_key_val is not None:
+                workout_type_raw = activity_key_val
+        
+        # Fallback to sport info (e.g., 'Sport:1, SubSport:5') if still null
+        if workout_type_raw is None:
+            sport_id = message.get_value('sport')
+            sub_sport_id = message.get_value('sub_sport')
+            s_parts = []
+            if sport_id is not None: s_parts.append(f"S:{sport_id}")
+            if sub_sport_id is not None: s_parts.append(f"SS:{sub_sport_id}")
+            if s_parts:
+                workout_type_raw = ", ".join(s_parts)
+
+        # Translate workout type from Apple Watch codes to readable names
+        mapped_wt = "UNKNOWN"
+        TYPES_MAP = {"37": "Outdoor Run"}  # Mapping known codes
+        
+        raw_str = str(workout_type_raw) if workout_type_raw is not None else ""
+        
+        # Check if the code exists in our map
+        for k, v in TYPES_MAP.items():
+            if str(k) == raw_str:
+                mapped_wt = v
+
+        if workout_type_raw is not None:
+             metrics["workout_type"] = mapped_wt if mapped_wt != "UNKNOWN" else raw_str
 
         lap_count_val = message.get_value('num_laps')
         if lap_count_val is not None:
