@@ -3,6 +3,29 @@ import json
 import re
 from fitparse import FitFile
 from dotenv import load_dotenv
+from dataclasses import dataclass
+
+@dataclass
+class LapInfo:
+    time: float = None
+    pace: str = None
+    heart_rate: int = None
+    power: int = None
+    cadence: int = None
+
+def calculate_hr_zone(hr, max_hr):
+    """Calculates the heart rate zone (1-5) based on percentage of Max HR."""
+    if not hr or not max_hr: 
+        return None
+    try:
+        pct = (hr / max_hr) * 100
+        if pct < 60: return 1
+        elif pct < 70: return 2
+        elif pct < 80: return 3
+        elif pct < 90: return 4
+        else: return 5
+    except ZeroDivisionError:
+        return None
 
 
 def build_workout_name(sport_type: str = None, sub_sport: str = None, raw_path: str = None):
@@ -10,63 +33,10 @@ def build_workout_name(sport_type: str = None, sub_sport: str = None, raw_path: 
     Dynamically builds a human-readable workout name (e.g., 'Outdoor Run', 'Elevated Heart Rate Walk') 
     by mapping Fitness+ filenames and explicit binary labels.
     """
-    
-    # 1. Primary Source: Extract directly from the Fitness+ filename pattern: "YYYY-MM-DD-HHMMSS-TYPE-BY_Zakaria"
-    if raw_path:
-        basename = os.path.basename(raw_path)
-        # Apple Fitness+ filenames contain dashes like "-Indoor Walking-" or "-Outdoor Running-"
-        name_match = re.search(r'-([A-Za-z\s]+?)-', basename)
-        
-        if name_match:
-            base_name = name_match.group(1).strip()
+    if 'running' in sport_type and 'generic' in sub_sport:
+        clean_name = 'Outdoor Run'
     else:
-        base_name = sport_type
-
-    # 2. Secondary Source: Check raw binary bytes for explicit text strings (fallback/supplement)
-    if not base_name or str(base_name).isdigit():
-        if raw_path and os.path.exists(raw_path):
-            with open(raw_path, 'rb') as f:
-                content = f.read()
-            
-            # Apple FITs contain readable bytes like b'Run', b'WalkingCycling', b'MixedIntegrityWorkout'
-            if b'indoorRun' in content or b'SPORT_RUNNING' in content: base_name = 'INDOORRUNNING'
-            elif b'treadmill_walk' in content or b'indoorWalk' in content: base_name = 'INDOORWALKING'
-            elif b'Elevated Heart Rate Walk' in content: base_name = 'ELEVATED_HEART_RATE_WALK'
-            elif b'Treadmill_Cycling' in content: base_name = 'INDOORCYCLING'
-
-    # 3. Location & Formatting Logic: Handle Apple's unique fitness naming quirks
-    is_indoor = False
-    
-    # Check sub_sport explicitly provided or found (e.g., Apple uses "treadmill" for indoor run/walk)
-    if not base_name and sub_sport and 'treadmill' in str(sub_sport).lower():
-        is_indoor = True
-        
-    # Check internal FIT boolean flags via raw search as a safety net for missing filenames
-    if not base_name and raw_path and os.path.exists(raw_path):
-        with open(raw_path, 'rb') as f:
-            content = f.read()
-            if b'indoorIndoor: 1' in content or b'OUTDOOR_RUN: 0' in content or b'OUTDOOR_WALKING: 0' in content:
-                is_indoor = True
-
-    # Ultimate Fallback: Check the filename itself for indoor clues (e.g., "-indoor rowing-")
-    if raw_path and not base_name:
-        basename_lower = os.path.basename(raw_path).lower()
-        if '-indoor-' in basename_lower or '_indoor_' in basename_lower:
-            is_indoor = True
-
-    # Specific Fitness+ logic: Elliptical/Stationary Bike/Rower are always "Indoor" in Apple's ecosystem
-    clean_base = str(base_name).lower().replace(' ', '_')
-    if not is_indoor and (clean_base == 'fitness_equipment' or clean_base == 'elliptical'):
-        is_indoor = True
-    
-    # 4. Final Name Construction (Prevents double-prefixing like "Outdoor Indoor Run")
-    if base_name and ('INDOOR' in str(base_name).upper() or 'OUTDOOR' in str(base_name).upper()):
-        clean_name = str(base_name).strip().replace('_', ' ').title()
-    elif base_name:
-        clean_name = re.sub(r'([A-Z]+)', r'\1', base_name) # Handle acronyms (HIIT, HIIC) 
-        location_modifier = "Indoor" if is_indoor else "Outdoor"
-        clean_name = f"{location_modifier} {clean_name}"
-
+        clean_name = 'Unknown'
     return clean_name
 
 
@@ -81,18 +51,47 @@ def parse_single_fit_file(file_path):
     # Track metrics from session summary or calculate from raw data
     metrics = {
         'filename': os.path.basename(file_path),
+        
+        # Existing Metrics
         'total_distance_km': None,
+        'total_calories': None,
+        'total_timer_time': None,
+        'total_elapsed_time': None,
+        'min_heart_rate_bpm': None,
         'avg_heart_rate_bpm': None,
         'max_heart_rate_bpm': None,
-        'avg_pace_min_per_km': None,
+        'avg_temperature': None,
+        'start_time': None,
+        'timestamp': None,
+        'sport': None,
+        'sub_sport': None,
         'avg_running_cadence': None,
-        'workout_type': None,
-        'lap_count': None
-    }
+        'avg_power': None,
+        'total_ascent': None,
+        'lap_count' : None,
+        'SESSION INDOOR' : None,
+        'SESSION WEATHER HUMIDITY': None,
 
+        # NEW Target Metrics (Expansion Phase)
+
+        'avg_pace_min_per_km': None,
+        'workout_type': None,
+        'active_calories_kcal': None,
+        'elevation_gain_meters': 0.0,
+        'peak_hr_zone': None,
+        'laps_info': None,
+    }
     hr_values = []
     total_distance_meters = 0
-    total_time_seconds = 0
+    lap_count_val = 0
+    laps_info = []
+    
+    # Accumulators for fallback parsing (Strategy B)
+    session_calories_sum = 0
+    active_calories_sum = 0
+    ascent_sum = 0.0
+    descent_sum = 0.0
+
     summary_found = False
 
     # Strategy A: Try parsing the master 'session' summary block first
@@ -102,37 +101,49 @@ def parse_single_fit_file(file_path):
         base_sport_type = None
         sub_sport_val = None
 
-        # 1. Get Sport info from session (e.g., 'running')
+        # 1. Get Sport info from session (e.g., 'fitness_equipment, elliptical')
         sport_from_msg = message.get_value('sport')
         sub_from_msg = message.get_value('sub_sport')
 
-        # 2. Look up the explicit readable name from the Sport Message type ("Run")
-        for msg in fit_file.get_messages('sport'):
-            name_field = msg.get_value('name')
-            if isinstance(name_field, str) and 'Sport' not in name_field: 
-                base_sport_type = name_field 
-                break
-        
         # 3. Combine them into our new dynamic type!
         metrics['workout_type'] = build_workout_name(
-            sport_type=base_sport_type or sport_from_msg,
-            sub_sport=sub_from_msg or sub_sport_val,
+            sport_type=sport_from_msg,
+            sub_sport=sub_from_msg,
             raw_path=file_path
         )
 
         # Extract metrics from the session summary
         total_dist = message.get_value('total_distance')  # in meters
-        total_time = message.get_value('total_elapsed_time')  # in seconds
+        total_time = message.get_value('total_timer_time')  # in seconds
 
         # Average Heart Rate
         avg_hr = message.get_value('avg_heart_rate')
         if avg_hr:
-            metrics['avg_heart_rate_bpm'] = round(float(avg_hr), 1)
+            metrics['avg_heart_rate_bpm'] = avg_hr
 
-        # Max Heart Rate
+        # Max Heart Rate & Zone
         max_hr_raw = message.get_value('max_heart_rate')
+        min_hr_raw = message.get_value('min_heart_rate')
         if max_hr_raw:
-            metrics['max_heart_rate_bpm'] = float(max_hr_raw)
+            metrics['max_heart_rate_bpm'] = max_hr_raw
+            # Calculate Peak Zone for the session duration
+            metrics['peak_hr_zone'] = calculate_hr_zone(metrics['max_heart_rate_bpm'], metrics['max_heart_rate_bpm'])
+        if min_hr_raw:
+            metrics['min_heart_rate_bpm'] = min_hr_raw
+
+        # NEW: Extract Calories (Usually present in Session Summary block)
+        calories = message.get_value('total_calories')
+        if calories is not None:
+            metrics['total_calories_kcal'] = int(calories)
+            
+        active_cals = message.get_value('active_calories')
+        if active_cals is not None:
+            metrics['active_calories_kcal'] = int(active_cals)
+
+        # NEW: Extract Elevation from Session Summary
+        ascent_raw = message.get_value('total_ascent')
+        if ascent_raw: 
+            metrics['elevation_gain_meters'] = float(ascent_raw)
 
         # Pace calculation (only Apple Watch Running exports usually contain elapsed time & distance in session)
         if total_dist and total_time and total_dist > 0:
@@ -153,18 +164,50 @@ def parse_single_fit_file(file_path):
         if lap_count_val is not None:
             metrics['lap_count'] = int(lap_count_val)
         
-        break
+        break # Break after session processing as it handles most summaries
 
-    # Strategy B: Fallback to individual 'record' data points if session block is incomplete
-    if not summary_found or metrics['total_distance_km'] is None:
-        for message in fit_file.get_messages('record'):
-            hr = message.get_value('heart_rate')
-            if hr:
-                hr_values.append(hr)
+    # Strategy B: Fallback to LAPS/RECORDS if Session was missing data (Addressing Context Point 4 - Expansion Target)
+    if metrics['active_calories_kcal'] is None:
+        
+        # 1. Loop through Laps (Crucial for Energy and Elevation if Summary missed them)
+        total_laps = 0
+        for message in fit_file.get_messages('lap'):
+            total_laps += 1
+            lap_info = {
+                # Existing Metrics
+                'time': None,
+                'pace': None,
+                'heart_rate': None,
+                'power': None,
+                'cadence': None,
+            }
 
-            dist = message.get_value('distance') # cumulative distance tracker
-            if dist:
-                total_distance_meters = dist  
+            # Extract metrics from the session summary
+            total_dist = message.get_value('total_distance')  # in meters
+            total_time = message.get_value('total_timer_time')  # in seconds
+
+            avg_lap_raw_cadence = message.get_value('avg_running_cadence')
+            if avg_lap_raw_cadence:
+                lap_info['cadence'] = int(avg_lap_raw_cadence * 2)
+
+            if total_dist and total_time and total_dist > 0:
+                pace_minutes_raw = (total_time / 60.0) / (total_dist / 1000.0)
+                pace_min = int(pace_minutes_raw)
+                pace_sec = int((pace_minutes_raw - pace_min) * 60)
+                lap_info['pace'] = f'{pace_min}:{pace_sec:02d}'
+
+            laps_info.append(lap_info)
+        metrics['laps_info'] = laps_info
+
+    # Record fallbacks for raw data points
+    for message in fit_file.get_messages('record'):
+        hr = message.get_value('heart_rate')
+        if hr:
+            hr_values.append(hr)
+
+        dist = message.get_value('distance') # cumulative distance tracker
+        if dist:
+            total_distance_meters = max(total_distance_meters, dist)  
 
     # Apply fallback metrics if session parsing was empty
     if metrics['total_distance_km'] is None and total_distance_meters > 0:
