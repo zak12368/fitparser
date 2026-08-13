@@ -62,18 +62,34 @@ Constants:
 | `min_heart_rate_bpm` | int | session.min_heart_rate | |
 | `active_calories_kcal` | int | session.total_calories | Apple Watch FIT stores **active calories only** in this field |
 | `elevation_gain_meters` | float | session.total_ascent | null if not available |
+| `temperature_c` | int | session.avg_temperature | 151/160 workouts (outdoor + indoor) |
+| `humidity_pct` | float | session.SESSION WEATHER HUMIDITY / 100 | 151/160 workouts |
 | `avg_running_cadence` | int | session.avg_running_cadence × 2 | null if not available |
 | `lap_count` | int | session.num_laps | only present if >0 laps |
 | `start_time` | string | session.start_time | `"YYYY-MM-DD HH:MM:SS"` |
-| `laps_info` | array | per-lap | `[{time, pace, heart_rate, power, cadence}]` |
 | `peak_hr_zone` | int | calculated from max_hr | Zone 1-5 |
+| `hr_zone_distribution` | object | per-record elapsed time | Zone 1-5 time + pct (158/160) |
+| `dominant_hr_zone` | int | most time spent | Zone 1-5 |
+| `laps_info` | array | per-lap (1km auto-splits) | enriched split metrics below |
 
-**Lap `laps_info` fields:**
-- `time` — `"MM:SS"` format (e.g. `"08:31"`)
+**Lap `laps_info` fields (enriched):**
+Each lap is a 1km auto-split (`lap_trigger: distance`):
+- `time` — `"MM:SS"` format
 - `pace` — `"M:SS"` per km or null
-- `heart_rate` — int or null
-- `power` — int or null
-- `cadence` — int or null
+- `distance_km` — float (always 1.0 for auto-splits)
+- `calories` — int active calories per lap
+- `avg_speed_kmh` — float m/s → km/h
+- `heart_rate` — object `{avg, max, min}` or `{}` if missing
+- `power` — object `{avg, max}` or null (running only)
+- `cadence` — object `{avg, max}` (× 2 for full strides)
+- `strides` — int or null
+- `running_dynamics` — object (outdoor running only):
+  - `vertical_oscillation_mm` — body bounce per step
+  - `stance_time_ms` — ground contact time per step
+  - `step_length_mm` — stride length
+  - `vertical_ratio_pct` — oscillation / step_length × 100
+
+**Coverage:** 127/160 workouts have laps. 20/160 have running dynamics (outdoor runs).
 
 ## 5. Critical Apple Watch FIT Behavior ⚠️
 
@@ -92,11 +108,13 @@ Constants:
 - Formatted by `format_duration()` for output
 
 ## 6. Next Target: Metric Expansion 🧭
-Potential future additions:
-- **Time-in-HR-Zone distribution** — Currently peak_hr_zone is calculated from max HR only; per-record tracking needed for full zone distribution
+Completed:
+- ~~Time-in-HR-Zone distribution~~ ✅ (hr_zone_distribution + dominant_hr_zone)
+- ~~Split times / segment data~~ ✅ (enriched laps with HR range, power, cadence, running dynamics)
+- ~~Weather conditions~~ ✅ (temperature_c + humidity_pct, 151/160 coverage)
+
+Remaining:
 - **BMR/Resting calories** — Not in FIT file; would need to pull from Apple Health XML or HealthKit export
-- **Split times / segment data** — Additional lap-level detail
-- **Weather conditions** — If exported by Apple Watch (temperature, etc.)
 - **Floors climbed** — `floors_climbed` field in some FIT exports
 
 ## 7. Environment & Constraints 🛠

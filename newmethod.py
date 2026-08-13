@@ -72,9 +72,7 @@ def format_pace(total_time_s: float, distance_m: float) -> Optional[str]:
 
 
 def format_duration(seconds: float, include_hours: bool = True) -> str:
-    """Return duration as 'H:MM:SS' or 'M:SS' (e.g. '1:14:55' or '10:59')."""
-    if not seconds:
-        return "0:00:00"
+    """Return duration as 'H:MM:SS' or 'MM:SS' (e.g. '1:14:55' or '10:59')."""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
@@ -102,6 +100,53 @@ def calculate_hr_zone(hr: int, max_hr: int) -> Optional[int]:
 def build_workout_name(sport: str, sub_sport: str) -> str:
     """Look up the human-readable workout name from sport + sub_sport."""
     return WORKOUT_MAP.get((sport, sub_sport), "Other Workout")
+
+
+def calculate_hr_zone_distribution(hr_timestamps: list, max_hr: int) -> Optional[dict]:
+    """
+    Calculate time spent in each HR zone (1-5) using consecutive record timestamps.
+
+    Args:
+        hr_timestamps: list of (datetime, bpm) tuples sorted by time
+        max_hr: maximum heart rate for zone threshold calculation
+
+    Returns:
+        dict with seconds per zone, or None if insufficient data
+    """
+    if not hr_timestamps or not max_hr or len(hr_timestamps) < 2:
+        return None
+
+    zone_seconds = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+
+    for i in range(1, len(hr_timestamps)):
+        prev_ts, prev_hr = hr_timestamps[i - 1]
+        curr_ts, curr_hr = hr_timestamps[i]
+
+        elapsed = (curr_ts - prev_ts).total_seconds()
+        if elapsed <= 0:
+            continue
+
+        zone = calculate_hr_zone(prev_hr, max_hr)
+        if zone:
+            zone_seconds[zone] += elapsed
+
+    return zone_seconds
+
+
+def format_hr_zone_summary(zone_seconds: dict, total_seconds: float) -> str:
+    """Return a human-readable ASCII summary of HR zone distribution."""
+    lines = []
+    max_bar = 20
+    max_sec = max(zone_seconds.values()) if max(zone_seconds.values()) > 0 else 1
+
+    for zone in range(1, 6):
+        sec = zone_seconds.get(zone, 0)
+        pct = (sec / total_seconds * 100) if total_seconds > 0 else 0
+        bar_len = round(sec / max_sec * max_bar) if max_sec > 0 else 0
+        bar = "#" * bar_len
+        lines.append(f"  Zone {zone}: {sec:6.0f}s ({pct:5.1f}%) |{bar}")
+
+    return "\n".join(lines) + f"\n  Total: {total_seconds:.0f}s tracked"
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +217,15 @@ def parse_session(fit_file: FitFile) -> dict:
             message.get_value("total_ascent")
         )
 
+        # -- Weather (temperature + humidity) --
+        avg_temp = message.get_value("avg_temperature")
+        if avg_temp is not None:
+            metrics["temperature_c"] = int(avg_temp)
+
+        humidity_raw = message.get_value("SESSION WEATHER HUMIDITY")
+        if humidity_raw is not None:
+            metrics["humidity_pct"] = round(int(humidity_raw) / 100, 1)
+
         # -- Cadence --
         avg_cadence_raw = message.get_value("avg_running_cadence")
         if avg_cadence_raw:
@@ -193,24 +247,78 @@ def parse_session(fit_file: FitFile) -> dict:
 
 
 def parse_laps(fit_file: FitFile) -> list[dict]:
-    """Extract per-lap metrics (pace, cadence, HR, power)."""
+    """
+    Extract per-lap (1km split) metrics.
+    Apple Watch auto-splits by distance (1000 m) — these are your split times.
+    Returns enriched lap objects with HR/power/cadence as {avg, max} dicts.
+    """
     laps: list[dict] = []
     for message in fit_file.get_messages("lap"):
-        total_dist = message.get_value("total_distance")  # meters
-        total_time = message.get_value("total_timer_time")  # seconds
-        avg_cadence_raw = message.get_value("avg_running_cadence")
+        total_dist = message.get_value("total_distance")       # meters
+        total_time = message.get_value("total_timer_time")     # seconds
+
+        # -- Heart rate (avg + range) --
         avg_hr = message.get_value("avg_heart_rate")
+        max_hr = message.get_value("max_heart_rate")
+        min_hr = message.get_value("min_heart_rate")
+        hr_data = {k: v for k, v in zip(
+            ["avg", "max", "min"],
+            [_safe_int(avg_hr), _safe_int(max_hr), _safe_int(min_hr)]
+        ) if v is not None}
+
+        # -- Power (avg + max) --
         avg_power = message.get_value("avg_power")
+        max_power = message.get_value("max_power")
+        power_data = {k: v for k, v in zip(
+            ["avg", "max"],
+            [_safe_int(avg_power), _safe_int(max_power)]
+        ) if v is not None}
+
+        # -- Cadence (running or walking, avg + max) --
+        # Apple Watch reports half-cadence (per-leg), multiply by 2
+        avg_cad_raw = message.get_value("avg_running_cadence") or message.get_value("avg_cadence")
+        max_cad_raw = message.get_value("max_running_cadence") or message.get_value("max_cadence")
+        cad_data = {k: v for k, v in zip(
+            ["avg", "max"],
+            [
+                int(avg_cad_raw * CADENCE_MULTIPLIER) if avg_cad_raw else None,
+                int(max_cad_raw * CADENCE_MULTIPLIER) if max_cad_raw else None,
+            ]
+        ) if v is not None}
+
+        # -- Speed (m/s → km/h) --
+        avg_speed = message.get_value("enhanced_avg_speed") or message.get_value("avg_speed")
+
+        # -- Strides --
+        total_strides = message.get_value("total_strides")
+
+        # -- Running dynamics (outdoor running only) --
+        dyn_fields = {
+            "vertical_oscillation_mm": message.get_value("avg_vertical_oscillation"),
+            "stance_time_ms": message.get_value("avg_stance_time"),
+            "step_length_mm": message.get_value("avg_step_length"),
+            "vertical_ratio_pct": message.get_value("avg_vertical_ratio"),
+        }
+        dyn = {k: round(v, 1) for k, v in dyn_fields.items() if v is not None}
+
+        # -- Calories per lap --
+        lap_cal = message.get_value("total_calories")
 
         lap: dict = {
             "time": format_duration(total_time, include_hours=False),
             "pace": format_pace(total_time or 0, total_dist or 0),
-            "heart_rate": _safe_int(avg_hr),
-            "power": _safe_int(avg_power),
-            "cadence": (
-                int(avg_cadence_raw * CADENCE_MULTIPLIER) if avg_cadence_raw else None
-            ),
+            "distance_km": round(total_dist / 1000, 2) if total_dist else None,
+            "calories": _safe_int(lap_cal),
+            "avg_speed_kmh": round(avg_speed * 3.6, 1) if avg_speed else None,
+            "heart_rate": hr_data,
+            "power": power_data if power_data else None,
+            "cadence": cad_data,
+            "strides": _safe_int(total_strides),
         }
+        # Only include running_dynamics when at least one field exists
+        if dyn:
+            lap["running_dynamics"] = dyn
+
         laps.append(lap)
     return laps
 
@@ -219,15 +327,19 @@ def parse_records(fit_file: FitFile) -> dict:
     """
     Fallback: iterate individual records to recover distance and HR
     when session summary is incomplete.
-    Also collects all HR values for zone analysis.
+    Also collects (timestamp, hr) pairs for zone distribution analysis.
     """
     hr_values: list[int] = []
+    hr_timestamps: list[tuple] = []  # (datetime, bpm)
     max_distance = 0.0
 
     for message in fit_file.get_messages("record"):
         hr = message.get_value("heart_rate")
+        timestamp = message.get_value("timestamp")
         if hr:
             hr_values.append(int(hr))
+            if timestamp:
+                hr_timestamps.append((timestamp, int(hr)))
 
         dist = message.get_value("distance")  # cumulative
         if dist:
@@ -236,6 +348,7 @@ def parse_records(fit_file: FitFile) -> dict:
     return {
         "total_distance_m": max_distance,
         "hr_values": hr_values,
+        "hr_timestamps": hr_timestamps,
     }
 
 
@@ -263,7 +376,7 @@ def parse_single_fit_file(file_path: str) -> Optional[dict]:
     if laps:
         metrics["laps_info"] = laps
 
-    # -- 3. Parse records (fallback for missing session data) --
+    # -- 3. Parse records (fallback + HR zone distribution) --
     records = parse_records(fit_file)
 
     if metrics.get("total_distance_km") is None and records["total_distance_m"] > 0:
@@ -283,7 +396,23 @@ def parse_single_fit_file(file_path: str) -> Optional[dict]:
             metrics["max_heart_rate_bpm"], metrics["max_heart_rate_bpm"]
         )
 
-    # -- 5. Return only if we got at least one meaningful metric --
+    # -- 5. Calculate time-in-HR-zone distribution --
+    max_hr = metrics.get("max_heart_rate_bpm")
+    if max_hr and records.get("hr_timestamps"):
+        zone_seconds = calculate_hr_zone_distribution(
+            records["hr_timestamps"], max_hr
+        )
+        if zone_seconds:
+            total_zone_sec = sum(zone_seconds.values())
+            dist = {}
+            for z in range(1, 6):
+                sec = zone_seconds.get(z, 0)
+                dist[f"zone_{z}_time"] = format_duration(sec, include_hours=False)
+                dist[f"zone_{z}_pct"] = round(sec / total_zone_sec * 100, 1) if total_zone_sec > 0 else 0
+            metrics["hr_zone_distribution"] = dist
+            metrics["dominant_hr_zone"] = max(zone_seconds, key=zone_seconds.get)
+
+    # -- 6. Return only if we got at least one meaningful metric --
     if (
         metrics.get("total_distance_km")
         or metrics.get("avg_heart_rate_bpm")
