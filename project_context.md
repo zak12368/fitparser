@@ -1,15 +1,145 @@
-# 🍎 Apple Watch Fitness+ Fit-Parser Context (Source of Truth)
+# Apple Watch Fitness+ FIT Parser — Project Context
 
-## 1. Current Status ✅
-The parser (`newmethod.py`) is **fully production-ready** and has successfully processed **160 workouts** with 100% mapping accuracy (Zero "Other Workout" remain). 
+## Quick Start (Next Session)
 
-## 2. Core Strategy: Sport/Sub-Sport Lookup Table 🏃‍♂️
-Workout types are resolved via a direct `(sport, sub_sport)` lookup dictionary (`WORKOUT_MAP`). No filename extraction, no binary inspection — pure FIT protocol fields from the session message.
+```bash
+cd C:\Users\zakar\SportHealthAppleWatch
 
-**Discovered Apple Watch FIT sport/sub_sport values (11 unique combos across 160 workouts):**
+# Activate venv
+.venv\Scripts\activate
 
-| sport | sub_sport | workout_type | count |
-|-------|-----------|--------------|-------|
+# Run the parser (reads FIT_FOLDER=Z:\ from .env)
+python -m fit_parser
+
+# Override input/output
+python -m fit_parser --input Z:\ --output processed_workouts_final.json
+
+# Run tests
+python -m pytest tests/ -v
+
+# Lint + type-check
+python -m ruff check src/ tests/
+python -m ruff format src/ tests/
+python -m mypy src/
+```
+
+**Key files:**
+| Path | Purpose |
+|------|---------|
+| `src/fit_parser/` | Production package (9 modules, ~1060 lines) |
+| `tests/` | Test suite (45 tests) |
+| `pyproject.toml` | Dependencies + tool config (ruff, mypy, pytest) |
+| `.env` | Environment variables (`FIT_FOLDER=Z:\`) |
+| `newmethod.py` | Legacy monolithic script (reference only) |
+| `processed_workouts_final.json` | Output file (163 workouts) |
+
+---
+
+## 1. Current Status
+
+**Parser is production-ready.** Refactored from a monolithic script into a typed, tested, linted Python package. All quality gates pass:
+
+| Check | Result |
+|-------|--------|
+| mypy (9 source files) | 0 errors |
+| ruff check (lint) | 0 issues |
+| ruff format | 14 files formatted |
+| pytest | 45/45 passing |
+| End-to-end | 163/163 FIT files parsed |
+
+The refactored package produces **identical JSON output** to the legacy `newmethod.py` — all keys are backward-compatible.
+
+---
+
+## 2. Architecture (`src/fit_parser/`)
+
+```
+src/fit_parser/
+├── __init__.py      # Public API exports
+├── __main__.py      # python -m fit_parser entry
+├── cli.py           # argparse CLI (--input, --output, --verbose)
+├── config.py        # WORKOUT_MAP, constants, zone thresholds
+├── models.py        # Workout, Lap, HRZoneDistribution dataclasses
+├── parsers.py       # FIT message parsers (session, lap, record) — core logic
+├── zones.py         # HR zone classification + time distribution
+├── formatters.py    # Pace, duration, zone summary formatting
+└── logger.py        # Standard logging config
+```
+
+**Design decisions:**
+- Dataclasses for all models; `Workout.to_dict()` serializes to JSON
+- PEP 604 union syntax (`X | None`) throughout
+- Proper logging via `get_logger(__name__)` — no `print()` calls
+- `.env` loaded from project root (3 levels up from `src/fit_parser/`)
+- Zone thresholds are relative to workout's `max_heart_rate_bpm` (not age-based)
+
+---
+
+## 3. JSON Output Schema
+
+`processed_workouts_final.json` — array of workout objects:
+
+| Key | Type | Source | Coverage |
+|-----|------|--------|----------|
+| `filename` | string | FIT basename | 163/163 |
+| `workout_type` | string | WORKOUT_MAP lookup | 163/163 |
+| `total_distance_km` | float | session.total_distance | ~150/163 |
+| `total_timer_time` | string | session.total_timer_time | 163/163 (`"H:MM:SS"` or `"M:SS"`) |
+| `avg_pace_min_per_km` | string | calculated | ~150/163 (`"M:SS"`) |
+| `avg_heart_rate_bpm` | int | session.avg_heart_rate | ~160/163 |
+| `max_heart_rate_bpm` | int | session.max_heart_rate | ~160/163 |
+| `min_heart_rate_bpm` | int | session.min_heart_rate | ~160/163 |
+| `active_calories_kcal` | int | session.total_calories | ~160/163 |
+| `elevation_gain_meters` | float | session.total_ascent | ~80/163 |
+| `temperature_c` | int | session.avg_temperature | 151/163 |
+| `humidity_pct` | float | session.SESSION WEATHER HUMIDITY / 100 | 151/163 |
+| `avg_running_cadence` | int | session.avg_running_cadence × 2 | ~100/163 |
+| `start_time` | string | session.start_time | 163/163 |
+| `peak_hr_zone` | int | calculated | ~160/163 |
+| `dominant_hr_zone` | int | most time spent | 158/163 |
+| `hr_zone_distribution` | object | nested dict: `zone_{1-5}_time` + `zone_{1-5}_pct` | 158/163 |
+| `laps_info` | array | per-lap split objects | 127/163 |
+
+### `hr_zone_distribution` structure (nested object):
+```json
+{
+  "zone_1_time": "00:00", "zone_1_pct": 0.0,
+  "zone_2_time": "00:00", "zone_2_pct": 0.0,
+  "zone_3_time": "04:48", "zone_3_pct": 15.6,
+  "zone_4_time": "18:52", "zone_4_pct": 61.5,
+  "zone_5_time": "07:02", "zone_5_pct": 22.9
+}
+```
+
+### `laps_info` structure (per 1km auto-split):
+```json
+{
+  "time": "06:30",
+  "pace": "6:30",
+  "distance_km": 1.0,
+  "calories": 85,
+  "avg_speed_kmh": 9.2,
+  "heart_rate": { "avg": 165, "max": 180, "min": 140 },
+  "power": { "avg": 250, "max": 400 },
+  "cadence": { "avg": 160, "max": 180 },
+  "strides": 430,
+  "running_dynamics": {
+    "vertical_oscillation_mm": 100.0,
+    "stance_time_ms": 250.0,
+    "step_length_mm": 1500.0,
+    "vertical_ratio_pct": 6.7
+  }
+}
+```
+
+---
+
+## 4. Workout Type Mapping
+
+Resolved via `(sport, sub_sport)` lookup in `WORKOUT_MAP` (`src/fit_parser/config.py`):
+
+| sport | sub_sport | → workout_type | count |
+|-------|-----------|----------------|-------|
 | walking | generic | Outdoor Walk | 67 |
 | running | indoor_running | Indoor Run | 59 |
 | running | generic | Outdoor Run | 20 |
@@ -20,108 +150,54 @@ Workout types are resolved via a direct `(sport, sub_sport)` lookup dictionary (
 | training | strength_training | Strength Training | 1 |
 | 53 | generic | Dive | 1 |
 | 62 | 70 | HIIT | 1 |
-| hiit | generic | HIIT | 0 (mapped but unused) |
 
-**Key mappings that differ from FIT spec defaults:**
-- Apple Watch uses `indoor_running` (not `treadmill_running`) for treadmill runs
-- Apple Watch uses `indoor_rowing` (not `magnetic_rower`) for rowers
-- Apple Watch uses `indoor_walking` (not `treadmill_running`) for treadmill walks
-- Apple Watch uses `training`/`strength_training` (not `strength_training`/`generic`)
+**Apple Watch non-standard mappings:**
+- `indoor_running` (not `treadmill_running`), `indoor_rowing` (not `magnetic_rower`)
 - HIIT = numeric IDs `62`/`70`; Dive = `53`/`generic`
+- Fallback: unmapped → `"Other Workout"`
 
-**Fallback:** Any unmapped combo falls through to "Other Workout".
+---
 
-## 3. Architecture 🏗
-`newmethod.py` is modular with three parsing functions:
-- **`parse_session()`** — Extracts session-level metrics (distance, time, HR, calories, elevation)
-- **`parse_laps()`** — Extracts per-lap metrics (time, pace, HR, power, cadence)
-- **`parse_records()`** — Fallback for distance/HR when session summary is incomplete
+## 5. Known Edge Cases & Gotchas
 
-Helper functions:
-- **`format_pace(time_s, dist_m)`** → `"M:SS"` per km (e.g. `"8:31"`)
-- **`format_duration(seconds, include_hours)`** → `"H:MM:SS"` or `"M:SS"`
-- **`_safe_int()`** → Returns int or None
-- **`calculate_hr_zone(bpm, max_hr)`** → Zone 1-5 (percentage-based)
+| Issue | Behaviour | Location |
+|-------|-----------|----------|
+| Missing HR data | Zone distribution omitted silently (2 workouts) | `parsers.py:290` |
+| Missing weather data | Keys omitted silently (9 workouts: dive, indoor rowing, MyNetDiary export, walks without sensor data) | `parsers.py:100-105` |
+| No running dynamics indoors | `running_dynamics` is null for indoor workouts | `parsers.py:171` |
+| Cadence half-rate | Apple reports per-leg; multiplied by 2 | `CADENCE_MULTIPLIER = 2` |
+| Calories are active only | BMR/resting calories not in FIT file | Apple Watch limitation |
+| Humidity raw units | Stored as 0.01% — divided by 100 for `%` | `parsers.py:103` |
+| `round(None)` crash | Guarded with `_round1()` helper | `parsers.py:173` |
+| FIT file special chars | fitparse handles them; no rename needed | `fitparse` library |
 
-Constants:
-- **`CADENCE_MULTIPLIER = 2`** — Apple Watch reports half-cadence (per-leg), multiply by 2 for full strides/min
-- **`OUTPUT_FILE = "processed_workouts_final.json"`**
+---
 
-## 4. Current Dataset Metrics 📊
-`processed_workouts_final.json` extracts:
+## 6. Feature Status
 
-| Key | Type | Source | Notes |
-|-----|------|--------|-------|
-| `filename` | string | FIT file basename | |
-| `workout_type` | string | WORKOUT_MAP lookup | |
-| `total_distance_km` | float | session.total_distance | null if no distance |
-| `total_timer_time` | string | session.total_timer_time | `"H:MM:SS"` or `"M:SS"` |
-| `avg_pace_min_per_km` | string | calculated | `"M:SS"` per km |
-| `avg_heart_rate_bpm` | int | session.avg_heart_rate | |
-| `max_heart_rate_bpm` | int | session.max_heart_rate | |
-| `min_heart_rate_bpm` | int | session.min_heart_rate | |
-| `active_calories_kcal` | int | session.total_calories | Apple Watch FIT stores **active calories only** in this field |
-| `elevation_gain_meters` | float | session.total_ascent | null if not available |
-| `temperature_c` | int | session.avg_temperature | 151/160 workouts (outdoor + indoor) |
-| `humidity_pct` | float | session.SESSION WEATHER HUMIDITY / 100 | 151/160 workouts |
-| `avg_running_cadence` | int | session.avg_running_cadence × 2 | null if not available |
-| `lap_count` | int | session.num_laps | only present if >0 laps |
-| `start_time` | string | session.start_time | `"YYYY-MM-DD HH:MM:SS"` |
-| `peak_hr_zone` | int | calculated from max_hr | Zone 1-5 |
-| `hr_zone_distribution` | object | per-record elapsed time | Zone 1-5 time + pct (158/160) |
-| `dominant_hr_zone` | int | most time spent | Zone 1-5 |
-| `laps_info` | array | per-lap (1km auto-splits) | enriched split metrics below |
+### Done
+- [x] HR zone distribution (time + pct per zone, dominant zone)
+- [x] Weather extraction (temperature + humidity)
+- [x] Split/lap data (enriched with HR, power, cadence, running dynamics)
+- [x] Full codebase refactoring (src layout, dataclasses, type hints, tests, linting)
+- [x] CLI entry point with argparse
+- [x] Proper logging (structured, loguru-style)
 
-**Lap `laps_info` fields (enriched):**
-Each lap is a 1km auto-split (`lap_trigger: distance`):
-- `time` — `"MM:SS"` format
-- `pace` — `"M:SS"` per km or null
-- `distance_km` — float (always 1.0 for auto-splits)
-- `calories` — int active calories per lap
-- `avg_speed_kmh` — float m/s → km/h
-- `heart_rate` — object `{avg, max, min}` or `{}` if missing
-- `power` — object `{avg, max}` or null (running only)
-- `cadence` — object `{avg, max}` (× 2 for full strides)
-- `strides` — int or null
-- `running_dynamics` — object (outdoor running only):
-  - `vertical_oscillation_mm` — body bounce per step
-  - `stance_time_ms` — ground contact time per step
-  - `step_length_mm` — stride length
-  - `vertical_ratio_pct` — oscillation / step_length × 100
+### Deferred
+- [ ] BMR/Resting calories — not available in FIT file; requires Apple Health XML
+- [ ] Floors climbed — `floors_climbed` field exists in some FIT exports (low priority)
+- [ ] Console ASCII zone visualization — `format_hr_zone_summary()` exists but not wired into CLI
 
-**Coverage:** 127/160 workouts have laps. 20/160 have running dynamics (outdoor runs).
+---
 
-## 5. Critical Apple Watch FIT Behavior ⚠️
+## 7. Environment
 
-### Calories
-- Apple Watch FIT exports store **active calories** in the `total_calories` field
-- True total calories (active + BMR/resting) are **NOT exported** in the FIT file
-- The `active_calories` field in the FIT spec is **always None** for Apple Watch exports
-- Example: A run showing 920 total calories in the Fitness app will have `total_calories=780` in the FIT file (780 = active only, 140 = BMR not exported)
-
-### Cadence
-- Apple Watch reports cadence as half-cadence (per-leg strikes)
-- Must multiply by 2 to get full strides-per-minute
-
-### Duration
-- Stored as raw seconds (e.g. `4495.178`)
-- Formatted by `format_duration()` for output
-
-## 6. Next Target: Metric Expansion 🧭
-Completed:
-- ~~Time-in-HR-Zone distribution~~ ✅ (hr_zone_distribution + dominant_hr_zone)
-- ~~Split times / segment data~~ ✅ (enriched laps with HR range, power, cadence, running dynamics)
-- ~~Weather conditions~~ ✅ (temperature_c + humidity_pct, 151/160 coverage)
-
-Remaining:
-- **BMR/Resting calories** — Not in FIT file; would need to pull from Apple Health XML or HealthKit export
-- **Floors climbed** — `floors_climbed` field in some FIT exports
-
-## 7. Environment & Constraints 🛠
-- **Target OS**: Windows CMD / PowerShell.
-- **Constraint**: Terminal output must be strictly ASCII-safe (No 📈 or ✅ emojis in console).
-- **Env Variables**: `FIT_FOLDER` (Directory containing `.fit` files), currently `Z:\` (mapped NAS drive)
-- **NAS path**: `\\NAS\personal_folder\Files\HealthDataApple\` mapped to `Z:\`
-- **Dataset size**: 160 `.fit` files (March 2025 – August 2026)
-- **Dependencies**: `fitparse` (in `.venv`)
-- **Output**: `processed_workouts_final.json` (JSON array of workout objects)
+- **OS:** Windows (CMD / PowerShell)
+- **Python:** 3.14.0
+- **Venv:** `.venv/` (use `.venv\Scripts\activate` or `.venv\Scripts\python.exe`)
+- **FIT files:** `Z:\` (mapped NAS drive `\\NAS\personal_folder\Files\HealthDataApple\`)
+- **Dataset:** 163 `.fit` files (March 2025 – August 2026)
+- **Dependencies (runtime):** `fitparse`
+- **Dependencies (dev):** `ruff`, `mypy`, `pytest`, `pytest-cov`
+- **Tool config:** `pyproject.toml` (build backend: `setuptools.build_meta`)
+- **Console output:** ASCII-safe (no emojis in terminal)
