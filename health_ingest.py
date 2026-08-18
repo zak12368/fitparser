@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """Scan health JSON files and upsert daily metrics into PostgreSQL.
 
-Expects files matching Daily_Overall_Metrics_*.json and Daily_Weight_Metrics_*.json
-in the /input volume. Parses each file and upserts into daily_activity, daily_weight,
-and daily_sleep tables (date as unique key).
+Supports both single-day and bulk (date-range) files:
+  Daily_Overall_Metrics_YYYY-MM-DD.json        (single day)
+  Daily_Overall_Metrics-YYYY-MM-DD-YYYY-MM-DD.json  (bulk range)
+  Daily_Weight_Metrics_*.json / Daily_Weight_Metrics-*.json
+
+Dates are read from each entry's "date" field — filename is not used for dates.
+Multiple sleep sessions on the same day are aggregated (durations summed,
+start/end timestamps kept earliest/latest).
+
+Upserts into daily_activity, daily_weight, and daily_sleep tables (date as unique key).
 """
 
 import glob
 import json
 import os
 import sys
-import psycopg2
+from collections import defaultdict
 from datetime import datetime
+
+import psycopg2
 from psycopg2.extras import execute_values
 
 HEALTH_SCHEMA_PATH = os.getenv("HEALTH_SCHEMA_PATH", "/health_schema.sql")
-INPUT_DIR = os.getenv("HEALTH_INPUT_DIR", "/input")
+INPUT_DIR = os.getenv("HEALTH_INPUT_PATH", "/input")
 
 PG_HOST = os.getenv("PG_HOST", "postgres")
 PG_PORT = os.getenv("PG_PORT", "5432")
@@ -23,7 +32,7 @@ PG_DATABASE = os.getenv("PG_DATABASE", "fit2json")
 PG_USER = os.getenv("PG_USER", "fit2json")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "")
 
-# Metric name → (table, column) mapping
+# Metric name → column mapping
 ACTIVITY_METRICS = {
     "step_count": "step_count",
     "active_energy": "active_energy_kcal",
@@ -41,6 +50,8 @@ WEIGHT_METRICS = {
     "body_fat_percentage": "body_fat_pct",
 }
 
+INTEGER_COLUMNS = {"step_count", "walking_heart_rate_avg_bpm"}
+
 
 def parse_timestamp(ts_str):
     """Parse timestamp strings like '2026-08-16 00:00:00 -0400'."""
@@ -56,16 +67,10 @@ def parse_timestamp(ts_str):
             return None
 
 
-def extract_date_from_file(filepath):
-    """Try to extract date from filename like Daily_Overall_Metrics_2026-08-17.json."""
-    basename = os.path.basename(filepath)
-    parts = basename.replace(".json", "").split("_")
-    for part in parts:
-        try:
-            return datetime.strptime(part, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-    return None
+def _add_source(sources: list, source: str | None):
+    """Add a source string to a list if non-empty and not already present."""
+    if source and source not in sources:
+        sources.append(source)
 
 
 def ensure_schema(conn):
@@ -199,99 +204,161 @@ def upsert_sleep(conn, records):
 
 
 def parse_overall_metrics(filepath):
-    """Parse Daily_Overall_Metrics_*.json and return activity + sleep records."""
+    """Parse a Daily_Overall_Metrics file (single-day or bulk range).
+
+    Iterates every entry in every metric, reads the date from the entry itself,
+    and groups by date.  Multiple sleep sessions on the same day are aggregated.
+
+    Returns (activity_records: list[dict], sleep_records: list[dict]).
+    """
     with open(filepath) as f:
         data = json.load(f)
 
-    file_date = extract_date_from_file(filepath)
-    if not file_date:
-        print(f"  WARNING: could not extract date from {filepath}, skipping")
-        return [], []
-
-    activity = {"date": file_date}
-    sleep = {"date": file_date}
-    source_parts = []
+    # Accumulate per-date: {date: {col: val, ...}, date: ...}
+    activity_accum = defaultdict(lambda: {"source_parts": []})
+    sleep_accum = defaultdict(lambda: {"sessions": [], "source_parts": []})
 
     metrics = data.get("data", {}).get("metrics", [])
     for metric in metrics:
         name = metric.get("name")
         entries = metric.get("data", [])
-        if not entries:
+
+        for entry in entries:
+            ts = parse_timestamp(entry.get("date", ""))
+            if ts is None:
+                continue
+            entry_date = ts.date()
+            source = entry.get("source")
+
+            if name == "sleep_analysis":
+                session = {
+                    "total_sleep_hr": entry.get("totalSleep"),
+                    "deep_hr": entry.get("deep"),
+                    "rem_hr": entry.get("rem"),
+                    "core_hr": entry.get("core"),
+                    "awake_hr": entry.get("awake"),
+                    "in_bed_hr": entry.get("inBed"),
+                    "asleep_hr": entry.get("asleep"),
+                    "sleep_start": parse_timestamp(entry.get("sleepStart")),
+                    "sleep_end": parse_timestamp(entry.get("sleepEnd")),
+                    "in_bed_start": parse_timestamp(entry.get("inBedStart")),
+                    "in_bed_end": parse_timestamp(entry.get("inBedEnd")),
+                }
+                sleep_accum[entry_date]["sessions"].append(session)
+                _add_source(sleep_accum[entry_date]["source_parts"], source)
+
+            elif name in ACTIVITY_METRICS:
+                col = ACTIVITY_METRICS[name]
+                qty = entry.get("qty")
+                if col in INTEGER_COLUMNS:
+                    qty = int(qty) if qty else None
+                activity_accum[entry_date][col] = qty
+                _add_source(activity_accum[entry_date]["source_parts"], source)
+
+    # ---- Build final activity records ----
+    final_activity = []
+    for d, rec in activity_accum.items():
+        sources = rec.pop("source_parts", [])
+        rec["date"] = d
+        rec["source"] = "|".join(sources) if sources else None
+        final_activity.append(rec)
+
+    # ---- Aggregate sleep sessions per day ----
+    final_sleep = []
+    for d, rec in sleep_accum.items():
+        sessions = rec["sessions"]
+        if not sessions:
             continue
+        sources = rec["source_parts"]
 
-        entry = entries[0]  # first (usually only) entry
-        if entry.get("source"):
-            src = entry["source"]
-            if src and src not in source_parts:
-                source_parts.append(src)
+        if len(sessions) == 1:
+            rec_out = sessions[0].copy()
+            rec_out["date"] = d
+            rec_out["source"] = "|".join(sources) if sources else None
+        else:
+            # Multiple sessions: sum durations, earliest start / latest end
+            rec_out = {
+                "date": d,
+                "total_sleep_hr": sum((s.get("total_sleep_hr") or 0) for s in sessions),
+                "deep_hr": sum((s.get("deep_hr") or 0) for s in sessions),
+                "rem_hr": sum((s.get("rem_hr") or 0) for s in sessions),
+                "core_hr": sum((s.get("core_hr") or 0) for s in sessions),
+                "awake_hr": sum((s.get("awake_hr") or 0) for s in sessions),
+                "in_bed_hr": sum((s.get("in_bed_hr") or 0) for s in sessions),
+                "asleep_hr": sum((s.get("asleep_hr") or 0) for s in sessions),
+                "sleep_start": min(
+                    (s["sleep_start"] for s in sessions if s.get("sleep_start")),
+                    default=None,
+                ),
+                "sleep_end": max(
+                    (s["sleep_end"] for s in sessions if s.get("sleep_end")),
+                    default=None,
+                ),
+                "in_bed_start": min(
+                    (s["in_bed_start"] for s in sessions if s.get("in_bed_start")),
+                    default=None,
+                ),
+                "in_bed_end": max(
+                    (s["in_bed_end"] for s in sessions if s.get("in_bed_end")),
+                    default=None,
+                ),
+                "source": "|".join(sources) if sources else None,
+            }
+        final_sleep.append(rec_out)
 
-        if name == "sleep_analysis":
-            sleep["total_sleep_hr"] = entry.get("totalSleep")
-            sleep["deep_hr"] = entry.get("deep")
-            sleep["rem_hr"] = entry.get("rem")
-            sleep["core_hr"] = entry.get("core")
-            sleep["awake_hr"] = entry.get("awake")
-            sleep["in_bed_hr"] = entry.get("inBed")
-            sleep["asleep_hr"] = entry.get("asleep")
-            sleep["sleep_start"] = parse_timestamp(entry.get("sleepStart"))
-            sleep["sleep_end"] = parse_timestamp(entry.get("sleepEnd"))
-            sleep["in_bed_start"] = parse_timestamp(entry.get("inBedStart"))
-            sleep["in_bed_end"] = parse_timestamp(entry.get("inBedEnd"))
-        elif name in ACTIVITY_METRICS:
-            col = ACTIVITY_METRICS[name]
-            qty = entry.get("qty")
-            # Convert to int for integer columns
-            if col in ("step_count", "walking_heart_rate_avg_bpm"):
-                activity[col] = int(qty) if qty else None
-            else:
-                activity[col] = qty
-
-    activity["source"] = "|".join(source_parts) if source_parts else None
-    sleep["source"] = "|".join(source_parts) if source_parts else None
-    return [activity], [sleep]
+    print(f"    → {len(final_activity)} activity record(s), {len(final_sleep)} sleep record(s)")
+    return final_activity, final_sleep
 
 
 def parse_weight_metrics(filepath):
-    """Parse Daily_Weight_Metrics_*.json and return weight records."""
+    """Parse a Daily_Weight_Metrics file (single-day or bulk range).
+
+    Iterates every entry in every metric, reads the date from the entry itself,
+    and groups by date.
+
+    Returns weight_records: list[dict].
+    """
     with open(filepath) as f:
         data = json.load(f)
 
-    file_date = extract_date_from_file(filepath)
-    if not file_date:
-        print(f"  WARNING: could not extract date from {filepath}, skipping")
-        return []
-
-    weight = {"date": file_date}
-    source_parts = []
+    weight_accum = defaultdict(lambda: {"source_parts": []})
 
     metrics = data.get("data", {}).get("metrics", [])
     for metric in metrics:
         name = metric.get("name")
         entries = metric.get("data", [])
-        if not entries:
-            continue
 
-        entry = entries[0]
-        if entry.get("source"):
-            src = entry["source"]
-            if src and src not in source_parts:
-                source_parts.append(src)
+        for entry in entries:
+            ts = parse_timestamp(entry.get("date", ""))
+            if ts is None:
+                continue
+            entry_date = ts.date()
+            source = entry.get("source")
 
-        if name in WEIGHT_METRICS:
-            col = WEIGHT_METRICS[name]
-            weight[col] = entry.get("qty")
+            if name in WEIGHT_METRICS:
+                col = WEIGHT_METRICS[name]
+                weight_accum[entry_date][col] = entry.get("qty")
+                _add_source(weight_accum[entry_date]["source_parts"], source)
 
-    weight["source"] = "|".join(source_parts) if source_parts else None
-    return [weight]
+    # Build final weight records
+    final_weight = []
+    for d, rec in weight_accum.items():
+        sources = rec.pop("source_parts", [])
+        rec["date"] = d
+        rec["source"] = "|".join(sources) if sources else None
+        final_weight.append(rec)
+
+    print(f"    → {len(final_weight)} weight record(s)")
+    return final_weight
 
 
 def main():
     conn = None
     try:
-        # Find all health JSON files
+        # Glob patterns — match both single-day (_date.json) and bulk (-date-range.json)
         patterns = [
-            os.path.join(INPUT_DIR, "Daily_Overral_Metrics_*.json"),
-            os.path.join(INPUT_DIR, "Daily_Weight_Metrics_*.json"),
+            os.path.join(INPUT_DIR, "Daily_Overall_Metrics*.json"),
+            os.path.join(INPUT_DIR, "Daily_Weight_Metrics*.json"),
         ]
         files = []
         for pat in patterns:
@@ -326,13 +393,13 @@ def main():
             basename = os.path.basename(filepath)
             print(f"\nProcessing: {basename}")
 
-            if "Overral" in basename:
+            if "Weight" in basename:
+                weight = parse_weight_metrics(filepath)
+                all_weight.extend(weight)
+            elif "Overall" in basename:
                 activity, sleep = parse_overall_metrics(filepath)
                 all_activity.extend(activity)
                 all_sleep.extend(sleep)
-            elif "Weight" in basename:
-                weight = parse_weight_metrics(filepath)
-                all_weight.extend(weight)
             else:
                 print(f"  Skipping unknown file type: {basename}")
 
