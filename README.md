@@ -1,11 +1,15 @@
-# Apple Watch Fitness FIT Parser
+# Apple Watch Fitness FIT Parser & Health Ingestion
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://img.shields.io/badge/lint-ruff-red.svg)](https://docs.astral.sh/ruff/)
 [![mypy](https://img.shields.io/badge/types-mypy-blue.svg)](https://mypy.readthedocs.io/)
 
-Parse `.fit` workout files exported from **Apple Fitness** into structured JSON containing workout metrics, heart rate zones, split times, and running dynamics.
+Parse `.fit` workout files and Apple Health JSON exports from **Apple Fitness** into structured data, optionally persisting everything into **PostgreSQL**.
+
+- **FIT Parser** — extracts workout metrics, heart rate zones, split times, and running dynamics from `.fit` files
+- **Health Ingestion** — parses Apple Health JSON exports (daily activity, weight, sleep) with bulk date-range support
+- **Database Ingestion** — upserts workouts and health metrics into PostgreSQL for querying
 
 ## Overview
 
@@ -13,6 +17,7 @@ Apple Watch exports workouts as `.fit` files (binary format from Garmin's FIT SD
 
 ## Features
 
+### FIT Parser
 - **Workout classification** — maps Apple Watch sport/sub-sport pairs to human-readable labels (Outdoor Run, Indoor Rower, HIIT, etc.)
 - **Heart rate zones** — calculates time and percentage in each of 5 zones based on max HR, plus peak and dominant zone
 - **Split/lap data** — per-km auto-splits with pace, distance, calories, speed, heart rate, power, cadence, and running dynamics
@@ -20,6 +25,18 @@ Apple Watch exports workouts as `.fit` files (binary format from Garmin's FIT SD
 - **Weather data** — temperature and humidity extracted when available
 - **Batch processing** — parse an entire folder of `.fit` files in one run
 - **Typed & tested** — full type hints (strict mypy), 45 passing tests, ruff linted and formatted
+
+### Health Metrics Ingestion
+- **Daily activity** — steps, active/resting energy, walking HR, respiratory rate, HRV, blood oxygen
+- **Weight tracking** — body mass, BMI, lean mass, body fat percentage
+- **Sleep analysis** — total sleep, deep/REM/core/awake hours, in-bed vs. asleep, timestamps
+- **Bulk file support** — handles both single-day (`_YYYY-MM-DD.json`) and date-range (`-YYYY-MM-DD-YYYY-MM-DD.json`) exports
+- **Sleep aggregation** — multiple sleep sessions on the same day are merged (durations summed, earliest/latest timestamps kept)
+
+### Database Ingestion
+- **PostgreSQL upserts** — workouts and health metrics keyed by filename / date
+- **JSONB storage** — HR zone distributions and lap details stored as queryable JSON
+- **Schema auto-creation** — tables and indexes created on first run
 
 ## Installation
 
@@ -42,6 +59,7 @@ pip install -e ".[dev]"
 |---------|---------|
 | `fitparse` | Parse Garmin FIT binary files |
 | `python-dotenv` | Load `.env` configuration |
+| `psycopg2` | PostgreSQL connectivity (ingestion scripts) |
 | `ruff` | Linting and formatting (dev) |
 | `mypy` | Static type checking (dev) |
 | `pytest`, `pytest-cov` | Testing and coverage (dev) |
@@ -66,10 +84,25 @@ python -m fit_parser --input Z:\ --output workouts.json --verbose
 Create a `.env` file in the project root:
 
 ```env
-FIT_FOLDER=Z:\
+# FIT Parser
+FIT_FOLDER=Z:\\
+
+# PostgreSQL
+PG_HOST=postgres
+PG_PORT=5432
+PG_DATABASE=fit2json
+PG_USER=fit2json
+PG_PASSWORD=
+
+# Ingestion paths
+JSON_PATH=/output/workouts.json
+SCHEMA_PATH=/schema.sql
+HEALTH_INPUT_PATH=/input
+HEALTH_SCHEMA_PATH=/health_schema.sql
 ```
 
-Or override via the `--input` flag.
+FIT parser variables can also be overridden via CLI flags (`--input`, `--output`).
+Ingestion scripts use environment variables or can be passed as arguments.
 
 ### Programmatic API
 
@@ -181,6 +214,12 @@ src/fit_parser/
 ├── zones.py         # HR zone classification + time distribution
 ├── formatters.py    # Pace, duration, zone summary formatting
 └── logger.py        # Structured logging configuration
+
+ingestion/
+├── ingest.py        # Upsert workout JSON → PostgreSQL (workouts table)
+├── health_ingest.py # Upsert Apple Health JSON → PostgreSQL (activity, weight, sleep)
+├── schema.sql       # PostgreSQL schema for workouts table
+└── health_schema.sql # PostgreSQL schema for daily activity, weight, sleep tables
 ```
 
 ## Quality Gates
@@ -201,9 +240,38 @@ python -m mypy src/
 python -m pytest tests/ -v
 ```
 
+## Data Pipeline
+
+```
+┌────────────────────┐     ┌─────────────────────┐
+│  .fit files (Z:)   │────>│  fit_parser (JSON)   │
+└────────────────────┘     └──────────┬──────────┘
+                                      │
+                                      ▼
+                               ┌──────────────┐
+                               │  ingest.py   │ ──► workouts table
+                               └──────────────┘
+
+┌─────────────────────────────────┐     ┌─────────────────────┐
+│  Apple Health JSON exports      │────>│  health_ingest.py   │ ──► daily_activity
+│  (activity, weight, sleep)      │     └─────────────────────┘      daily_weight
+└─────────────────────────────────┘                                       daily_sleep
+```
+
+### Usage — Health & Database Ingestion
+
+```bash
+# Ingest workout JSON into Postgres
+python ingest.py
+
+# Ingest health metrics (activity + weight + sleep) into Postgres
+python health_ingest.py
+```
+
+Both scripts connect to PostgreSQL, ensure the schema exists, and upsert all records.
+
 ## Known Limitations
 
-- **BMR/Resting calories** — not stored in Apple Watch FIT exports (would require Apple Health XML)
 - **Floors climbed** — available in some FIT files but not currently extracted
 - **Indoor workouts** — no running dynamics or elevation data (GPS not available)
 - **Cadence** — Apple reports per-leg; the parser multiplies by 2 to get full strides

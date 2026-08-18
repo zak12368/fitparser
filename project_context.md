@@ -29,7 +29,11 @@ python -m mypy src/
 | `src/fit_parser/` | Production package (9 modules, ~1060 lines) |
 | `tests/` | Test suite (45 tests) |
 | `pyproject.toml` | Dependencies + tool config (ruff, mypy, pytest) |
-| `.env` | Environment variables (`FIT_FOLDER=Z:\`) |
+| `.env` | Environment variables (`FIT_FOLDER`, `PG_*`, paths) |
+| `ingest.py` | Upsert workout JSON → PostgreSQL |
+| `health_ingest.py` | Upsert Apple Health JSON → PostgreSQL (activity, weight, sleep) |
+| `schema.sql` | Postgres schema for `workouts` table |
+| `health_schema.sql` | Postgres schema for `daily_activity`, `daily_weight`, `daily_sleep` |
 | `newmethod.py` | Legacy monolithic script (reference only) |
 | `processed_workouts_final.json` | Output file (163 workouts) |
 
@@ -48,6 +52,15 @@ python -m mypy src/
 | End-to-end | 163/163 FIT files parsed |
 
 The refactored package produces **identical JSON output** to the legacy `newmethod.py` — all keys are backward-compatible.
+
+**PostgreSQL ingestion is live.** Two ingestion scripts persist parsed data:
+
+| Script | Input | Target Tables |
+|--------|-------|---------------|
+| `ingest.py` | `workouts.json` | `workouts` (keyed by `filename`) |
+| `health_ingest.py` | Apple Health JSON exports | `daily_activity`, `daily_weight`, `daily_sleep` (keyed by `date`) |
+
+Health ingestion supports both single-day and bulk date-range files, with per-entry date parsing and sleep session aggregation.
 
 ---
 
@@ -184,20 +197,72 @@ Resolved via `(sport, sub_sport)` lookup in `WORKOUT_MAP` (`src/fit_parser/confi
 - [x] Proper logging (structured, loguru-style)
 
 ### Deferred
-- [ ] BMR/Resting calories — not available in FIT file; requires Apple Health XML
 - [ ] Floors climbed — `floors_climbed` field exists in some FIT exports (low priority)
 - [ ] Console ASCII zone visualization — `format_hr_zone_summary()` exists but not wired into CLI
+- [ ] Unified CLI — single command to run parser + ingestion end-to-end
+- [ ] Dashboard / query layer — SQL views or a lightweight API on top of the Postgres schema
 
 ---
 
-## 7. Environment
+## 7. Data Pipeline
+
+```
+.fit files (Z:)  ──► fit_parser ──► workouts.json ──► ingest.py ──► workouts (Postgres)
+
+Apple Health JSON ──► health_ingest.py ──► daily_activity, daily_weight, daily_sleep (Postgres)
+```
+
+### Health JSON file formats
+
+| Source | Filename Pattern | Entries |
+|--------|-----------------|---------|
+| Single day | `Daily_Overall_Metrics_YYYY-MM-DD.json` | 1 day |
+| Date range | `Daily_Overall_Metrics-YYYY-MM-DD-YYYY-MM-DD.json` | N days (bulk) |
+| Weight | `Daily_Weight_Metrics*.json` | 1 or N days |
+
+Dates are read from each entry's `"date"` field — the filename is only used for glob matching.
+
+### Health metrics mapped
+
+| Category | Metrics |
+|----------|--------|
+| Activity | step_count, active_energy, resting_energy, walking_heart_rate, respiratory_rate, hrv, blood_oxygen |
+| Weight | weight_kg, bmi, lean_body_mass, body_fat_pct |
+| Sleep | total_sleep_hr, deep_hr, rem_hr, core_hr, awake_hr, in_bed_hr, asleep_hr, timestamps |
+
+### Postgres schema
+
+| Table | Unique Key | Notes |
+|-------|-----------|-------|
+| `workouts` | `filename` (TEXT) | HR zones + laps stored as JSONB |
+| `daily_activity` | `date` (DATE) | Index on date DESC |
+| `daily_weight` | `date` (DATE) | Index on date DESC |
+| `daily_sleep` | `date` (DATE) | Multiple sessions aggregated per day |
+
+## 8. Environment
 
 - **OS:** Windows (CMD / PowerShell)
 - **Python:** 3.14.0
 - **Venv:** `.venv/` (use `.venv\Scripts\activate` or `.venv\Scripts\python.exe`)
 - **FIT files:** `Z:\` (mapped NAS drive `\\NAS\personal_folder\Files\HealthDataApple\`)
 - **Dataset:** 163 `.fit` files (March 2025 – August 2026)
-- **Dependencies (runtime):** `fitparse`
+- **PostgreSQL:** `fit2json` database (default host: `postgres`, port: `5432`)
+- **Dependencies (runtime):** `fitparse`, `psycopg2`
 - **Dependencies (dev):** `ruff`, `mypy`, `pytest`, `pytest-cov`
-- **Tool config:** `pyproject.toml` (build backend: `setuptools.build_meta`)
+- **Tool config:** `pyproject.toml` (build backend: `setuptools.build_meta`, version: 0.3.0)
 - **Console output:** ASCII-safe (no emojis in terminal)
+
+### Environment Variables
+
+| Variable | Default | Used By |
+|----------|---------|----------|
+| `FIT_FOLDER` | — | `fit_parser` (input directory) |
+| `PG_HOST` | `postgres` | `ingest.py`, `health_ingest.py` |
+| `PG_PORT` | `5432` | `ingest.py`, `health_ingest.py` |
+| `PG_DATABASE` | `fit2json` | `ingest.py`, `health_ingest.py` |
+| `PG_USER` | `fit2json` | `ingest.py`, `health_ingest.py` |
+| `PG_PASSWORD` | `""` | `ingest.py`, `health_ingest.py` |
+| `JSON_PATH` | `/output/workouts.json` | `ingest.py` |
+| `SCHEMA_PATH` | `/schema.sql` | `ingest.py` |
+| `HEALTH_INPUT_PATH` | `/input` | `health_ingest.py` |
+| `HEALTH_SCHEMA_PATH` | `/health_schema.sql` | `health_ingest.py` |
