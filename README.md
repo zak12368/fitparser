@@ -204,7 +204,7 @@ Unmapped combinations default to `"Other Workout"`.
 ## Project Structure
 
 ```
-src/fit_parser/
+src/fit_parser/                # Production package (importable)
 ├── __init__.py      # Public API exports
 ├── __main__.py      # python -m fit_parser entry
 ├── cli.py           # argparse CLI (--input, --output, --verbose)
@@ -215,11 +215,17 @@ src/fit_parser/
 ├── formatters.py    # Pace, duration, zone summary formatting
 └── logger.py        # Structured logging configuration
 
-ingestion/
+scripts/                     # Standalone ingestion scripts (run in Docker)
 ├── ingest.py        # Upsert workout JSON → PostgreSQL (workouts table)
-├── health_ingest.py # Upsert Apple Health JSON → PostgreSQL (activity, weight, sleep)
+└── health_ingest.py # Upsert Apple Health JSON → PostgreSQL (activity, weight, sleep)
+
+sql/                         # Database schemas
 ├── schema.sql       # PostgreSQL schema for workouts table
-└── health_schema.sql # PostgreSQL schema for daily activity, weight, sleep tables
+└── health_schema.sql # PostgreSQL schema for daily activity, weight, sleep
+
+tests/                       # Test suite (45 tests)
+archive/                     # Deprecated code (reference only)
+test_data/                   # Sample FIT files for manual testing
 ```
 
 ## Quality Gates
@@ -228,10 +234,10 @@ All checks must pass before merging:
 
 ```bash
 # Lint
-python -m ruff check src/ tests/
+python -m ruff check src/ scripts/ tests/
 
 # Format
-python -m ruff format src/ tests/
+python -m ruff format src/ scripts/ tests/
 
 # Type check
 python -m mypy src/

@@ -14,12 +14,20 @@ python -m fit_parser
 # Override input/output
 python -m fit_parser --input Z:\ --output processed_workouts_final.json
 
+# Run ingestion scripts (locally)
+python scripts/ingest.py
+python scripts/health_ingest.py
+
+# Run ingestion via Docker
+docker compose run --rm ingest
+docker compose run --rm health-ingest
+
 # Run tests
 python -m pytest tests/ -v
 
 # Lint + type-check
-python -m ruff check src/ tests/
-python -m ruff format src/ tests/
+python -m ruff check src/ scripts/ tests/
+python -m ruff format src/ scripts/ tests/
 python -m mypy src/
 ```
 
@@ -27,15 +35,13 @@ python -m mypy src/
 | Path | Purpose |
 |------|---------|
 | `src/fit_parser/` | Production package (9 modules, ~1060 lines) |
+| `scripts/` | Standalone ingestion scripts (run via Docker) |
+| `sql/` | PostgreSQL schema definitions |
 | `tests/` | Test suite (45 tests) |
 | `pyproject.toml` | Dependencies + tool config (ruff, mypy, pytest) |
 | `.env` | Environment variables (`FIT_FOLDER`, `PG_*`, paths) |
-| `ingest.py` | Upsert workout JSON → PostgreSQL |
-| `health_ingest.py` | Upsert Apple Health JSON → PostgreSQL (activity, weight, sleep) |
-| `schema.sql` | Postgres schema for `workouts` table |
-| `health_schema.sql` | Postgres schema for `daily_activity`, `daily_weight`, `daily_sleep` |
-| `newmethod.py` | Legacy monolithic script (reference only) |
-| `processed_workouts_final.json` | Output file (163 workouts) |
+| `archive/` | Deprecated code (reference only) |
+| `test_data/` | Sample FIT files for manual testing |
 
 ---
 

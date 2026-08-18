@@ -33,7 +33,7 @@ where = ["src"]
 # ---------------------------------------------------------------------------
 
 [tool.ruff]
-src = ["src"]
+src = ["src", "scripts"]
 line-length = 100
 target-version = "py311"
 
@@ -80,8 +80,14 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["fitparse.*"]
+module = ["fitparse.*", "psycopg2.*"]
 ignore_missing_imports = true
+
+# Scripts are standalone Docker utilities — lighter checks
+[[tool.mypy.overrides]]
+module = ["scripts.*"]
+ignore_missing_imports = true
+disallow_untyped_defs = false
 
 # ---------------------------------------------------------------------------
 # Pytest

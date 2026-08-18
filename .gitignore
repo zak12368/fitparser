@@ -218,5 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Generated output
 /processed_workouts_final.json
+workouts.json
+
+# Test FIT files (use test_data/sample.fit only if needed)
+test_data/*.fit
 *.fit
+
+# Archive is tracked (reference code)
+# Do not ignore archive/
