@@ -19,18 +19,19 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime
-
+from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import execute_values
 
-HEALTH_SCHEMA_PATH = os.getenv("HEALTH_SCHEMA_PATH", "/health_schema.sql")
-INPUT_DIR = os.getenv("HEALTH_INPUT_PATH", "/input")
+load_dotenv()
+HEALTH_SCHEMA_PATH = os.getenv("HEALTH_SCHEMA_PATH")
+INPUT_DIR = os.getenv("HEALTH_INPUT_PATH")
 
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DATABASE = os.getenv("PG_DATABASE", "fit2json")
-PG_USER = os.getenv("PG_USER", "fit2json")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+PG_HOST = os.getenv("PG_HOST")
+PG_PORT = os.getenv("PG_PORT")
+PG_DATABASE = os.getenv("PG_DATABASE")
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD")
 
 # Metric name → column mapping
 ACTIVITY_METRICS = {

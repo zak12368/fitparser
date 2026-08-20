@@ -6,16 +6,19 @@ import os
 import sys
 import psycopg2
 from datetime import timedelta
+from dotenv import load_dotenv
 from psycopg2.extras import execute_values
 
-JSON_PATH = os.getenv("JSON_PATH", "/output/workouts.json")
-SCHEMA_PATH = os.getenv("SCHEMA_PATH", "/schema.sql")
+load_dotenv()
 
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DATABASE = os.getenv("PG_DATABASE", "fit2json")
-PG_USER = os.getenv("PG_USER", "fit2json")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+FIT_INPUT_PATH = os.getenv("FIT_INPUT_PATH")
+SCHEMA_PATH = os.getenv("SCHEMA_PATH")
+
+PG_HOST = os.getenv("PG_HOST")
+PG_PORT = os.getenv("PG_PORT")
+PG_DATABASE = os.getenv("PG_DATABASE")
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD")
 
 
 def ensure_schema(conn):
@@ -119,8 +122,8 @@ def main():
     conn = None
     try:
         # Read JSON
-        print(f"Reading workouts from {JSON_PATH}...")
-        with open(JSON_PATH) as f:
+        print(f"Reading workouts from {FIT_INPUT_PATH}...")
+        with open(FIT_INPUT_PATH) as f:
             workouts = json.load(f)
         print(f"Found {len(workouts)} workout(s)")
 
